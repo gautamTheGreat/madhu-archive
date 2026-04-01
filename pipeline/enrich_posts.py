@@ -54,7 +54,7 @@ SITE_DATA     = PIPELINE_DIR.parent / 'code' / 'src' / 'data' / 'posts.json'
 CACHE_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-GEMINI_MODEL   = 'gemini-2.0-flash'
+GEMINI_MODEL   = 'gemini-flash-latest'
 MAX_WORKERS    = 10          # parallel Gemini threads
 CONTENT_LIMIT  = 5000        # max chars of post text sent to Gemini
 

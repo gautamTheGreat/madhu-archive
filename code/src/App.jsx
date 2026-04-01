@@ -1,100 +1,141 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import postsData from './data/posts.json';
-import GridTile from './components/PostCard';
-import PostModal from './components/PostModal';
-import { Grid3X3 } from 'lucide-react';
-import './index.css';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Routes, Route, useNavigate, useLocation } from 'react-router-dom';
+import Fuse from 'fuse.js';
 
-const PAGE_SIZE = 60;
+import rawPostsData from './data/posts.json';
+import RootLayout from './layouts/RootLayout';
+import Home from './pages/Home';
+import MapPage from './pages/MapPage';
+import StatsPage from './pages/StatsPage';
+import PostModalWrapper from './components/PostModalWrapper';
 
 function App() {
-  const [posts, setPosts] = useState([]);
-  const [selectedPost, setSelectedPost] = useState(null);
-  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const [theme, setTheme] = useState('dark');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedDynasty, setSelectedDynasty] = useState('All');
+  const [selectedGeo, setSelectedGeo] = useState('All');
+  const [selectedSort, setSelectedSort] = useState('shuffle');
 
-  useEffect(() => {
-    const valid = postsData.filter(p => p.content || (p.media && p.media.length > 0));
-    setPosts(valid);
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  // 1. Load robust posts array
+  const allPosts = useMemo(() => {
+    const dataArray = Array.isArray(rawPostsData) ? rawPostsData : (rawPostsData.posts || []);
+    return dataArray.filter(p => p.content || (p.media && p.media.length > 0));
   }, []);
 
-  const openPost = useCallback((post) => setSelectedPost(post), []);
-  const closePost = useCallback(() => setSelectedPost(null), []);
+  // 2. Setup Fuse.js for full-text search
+  const fuse = useMemo(() => {
+    return new Fuse(allPosts, {
+      keys: ['content', 'summary', 'temple_name', 'alternate_names', 'tags', 'hashtags', 'location.place_name', 'location.state', 'dynasty'],
+      threshold: 0.3,
+    });
+  }, [allPosts]);
 
-  const visiblePosts = posts.slice(0, visibleCount);
-  const hasMore = visibleCount < posts.length;
+  // Derived unique lists for dropdowns
+  const filterOptions = useMemo(() => {
+    const dynasties = new Set();
+    const geos = new Set();
+    allPosts.forEach(p => {
+      if (p.dynasty) dynasties.add(p.dynasty);
+      if (p.location?.state) geos.add(p.location.state);
+      else if (p.location?.country) geos.add(p.location.country);
+    });
+    return {
+      dynasties: Array.from(dynasties).sort(),
+      geos: Array.from(geos).sort()
+    };
+  }, [allPosts]);
+
+  // 3. Derived filtered and sorted posts
+  const filteredPosts = useMemo(() => {
+    let result = [...allPosts];
+
+    if (searchQuery.trim()) {
+      result = fuse.search(searchQuery).map(r => r.item);
+    }
+
+    if (selectedDynasty !== 'All') {
+      result = result.filter(p => p.dynasty === selectedDynasty);
+    }
+
+    if (selectedGeo !== 'All') {
+      result = result.filter(p => 
+        p.location?.state === selectedGeo || p.location?.country === selectedGeo
+      );
+    }
+
+    // Sort Logic
+    if (selectedSort === 'shuffle') {
+      // Deterministic shuffle algorithm based on post IDs so it doesn't jump around on every re-render
+      // But for a true shuffle on load, we can just pseudo-randomize it once or base it on length.
+      // A simple deterministic hash shuffle:
+      result.sort((a, b) => {
+        const hashA = a.id.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+        const hashB = b.id.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+        return (hashA % 100) - (hashB % 100);
+      });
+    } else if (selectedSort === 'posted_new') {
+      result.sort((a, b) => b.timestamp - a.timestamp);
+    } else if (selectedSort === 'posted_old') {
+      result.sort((a, b) => a.timestamp - b.timestamp);
+    } else if (selectedSort === 'built_old' || selectedSort === 'built_new') {
+      result = result.filter(p => p.historical_period?.start_year != null);
+      result.sort((a, b) => {
+        let yearA = a.historical_period.start_year;
+        if (a.historical_period.start_era === "BC" || a.historical_period.start_era === "BCE") yearA = -yearA;
+        
+        let yearB = b.historical_period.start_year;
+        if (b.historical_period.start_era === "BC" || b.historical_period.start_era === "BCE") yearB = -yearB;
+
+        return selectedSort === 'built_old' ? yearA - yearB : yearB - yearA;
+      });
+    }
+
+    return result;
+  }, [allPosts, fuse, searchQuery, selectedDynasty, selectedGeo, selectedSort]);
+
+  const toggleTheme = () => setTheme(prev => prev === 'dark' ? 'light' : 'dark');
+
+  // Sync theme to root element for CSS variables
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+  }, [theme]);
+
+  // Context value to pass down to Routes
+  const contextValue = {
+    allPosts,
+    filteredPosts,
+    searchQuery,
+    setSearchQuery,
+    filterOptions,
+    selectedDynasty,
+    setSelectedDynasty,
+    selectedGeo,
+    setSelectedGeo,
+    selectedSort,
+    setSelectedSort,
+    theme
+  };
+
+  // We maintain previousLocation so the background stays intact when opening the modal
+  const backgroundLocation = location.state && location.state.backgroundLocation;
 
   return (
     <>
-      {/* ── Navigation ── */}
-      <nav className="app-nav">
-        <a className="nav-brand" href="/" aria-label="Home">
-          <div className="nav-brand-icon">M</div>
-          <div>
-            <div className="nav-brand-name">Madhu Jagdhish</div>
-            <div className="nav-brand-sub">Sculpture Enthusiast</div>
-          </div>
-        </a>
-        <span className="nav-count">{posts.length} posts</span>
-      </nav>
+      <Routes location={backgroundLocation || location}>
+        <Route path="/" element={<RootLayout theme={theme} toggleTheme={toggleTheme} searchQuery={searchQuery} setSearchQuery={setSearchQuery} />}>
+          <Route index element={<Home context={contextValue} />} />
+          <Route path="map" element={<MapPage context={contextValue} />} />
+          <Route path="stats" element={<StatsPage context={contextValue} />} />
+        </Route>
+      </Routes>
 
-      {/* ── Profile Section ── */}
-      <section className="profile-section" aria-label="Profile">
-        <div className="profile-avatar" aria-hidden="true">M</div>
-        <div className="profile-info">
-          <h1 className="profile-name">Madhu Jagdhish</h1>
-          <div className="profile-stats">
-            <div className="profile-stat">
-              <strong>{posts.length}</strong>
-              <span>posts</span>
-            </div>
-            <div className="profile-stat">
-              <strong>10k+</strong>
-              <span>followers</span>
-            </div>
-          </div>
-          <p className="profile-bio">
-            Sculpture Enthusiast · Documenting ancient temple art, inscriptions & architecture across South &amp; Southeast Asia.
-          </p>
-        </div>
-      </section>
-
-      {/* ── Tabs ── */}
-      <div className="grid-tabs" role="tablist">
-        <button className="grid-tab active" role="tab" aria-selected="true">
-          <Grid3X3 size={13} />
-          Posts
-        </button>
-      </div>
-
-      {/* ── Instagram Grid ── */}
-      <main className="instagram-grid-wrapper">
-        <div className="instagram-grid" role="list">
-          {visiblePosts.map((post, index) => (
-            <GridTile
-              key={post.id}
-              post={post}
-              index={index}
-              onClick={() => openPost(post)}
-            />
-          ))}
-        </div>
-
-        {hasMore && (
-          <div className="load-more-wrapper">
-            <button
-              className="load-more-btn"
-              onClick={() => setVisibleCount(c => c + PAGE_SIZE)}
-            >
-              Load more
-            </button>
-          </div>
-        )}
-      </main>
-
-      {/* ── Post Modal ── */}
-      {selectedPost && (
-        <PostModal post={selectedPost} onClose={closePost} />
-      )}
+      {/* Modal is rendered outside the main Routes layout when a backgroundLocation is present, overlaying it */}
+      <Routes>
+        <Route path="/post/:postId" element={<PostModalWrapper allPosts={allPosts} />} />
+      </Routes>
     </>
   );
 }

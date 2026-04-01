@@ -27,7 +27,8 @@ export default function GridTile({ post, index, onClick }) {
     );
   }
 
-  const firstMedia = media[0];
+  const firstMediaItem = media[0];
+  const firstMedia = typeof firstMediaItem === 'string' ? firstMediaItem : (firstMediaItem?.publicUrl || firstMediaItem?.uri || '');
   const isVideo = firstMedia.endsWith('.mp4') || firstMedia.endsWith('.mov') || firstMedia.endsWith('.webm');
   const mediaSrc = firstMedia.startsWith('http') ? firstMedia : firstMedia.replace(/ /g, '%20');
 
