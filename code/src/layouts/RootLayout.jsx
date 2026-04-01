@@ -21,10 +21,7 @@ export default function RootLayout({ theme, toggleTheme, searchQuery, setSearchQ
         <div className="nav-right">
           <div className="nav-links">
             <NavLink to="/" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
-              <Grid3X3 size={18} /> <span className="hide-mobile">Grid</span>
-            </NavLink>
-            <NavLink to="/map" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
-              <MapIcon size={18} /> <span className="hide-mobile">Map</span>
+              <Grid3X3 size={18} /> <span className="hide-mobile">Archive</span>
             </NavLink>
             <NavLink to="/stats" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
               <BarChart2 size={18} /> <span className="hide-mobile">Stats</span>

@@ -5,7 +5,6 @@ import Fuse from 'fuse.js';
 import rawPostsData from './data/posts.json';
 import RootLayout from './layouts/RootLayout';
 import Home from './pages/Home';
-import MapPage from './pages/MapPage';
 import StatsPage from './pages/StatsPage';
 import PostModalWrapper from './components/PostModalWrapper';
 
@@ -127,7 +126,6 @@ function App() {
       <Routes location={backgroundLocation || location}>
         <Route path="/" element={<RootLayout theme={theme} toggleTheme={toggleTheme} searchQuery={searchQuery} setSearchQuery={setSearchQuery} />}>
           <Route index element={<Home context={contextValue} />} />
-          <Route path="map" element={<MapPage context={contextValue} />} />
           <Route path="stats" element={<StatsPage context={contextValue} />} />
         </Route>
       </Routes>
