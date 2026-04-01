@@ -102,6 +102,29 @@ function App() {
     document.documentElement.setAttribute('data-theme', theme);
   }, [theme]);
 
+  // Analytics: Track search queries (debounced to avoid spamming)
+  useEffect(() => {
+    if (window.umami && searchQuery.trim().length > 2) {
+      const timer = setTimeout(() => {
+        window.umami.track('search', { query: searchQuery.trim() });
+      }, 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [searchQuery]);
+
+  // Analytics: Track filter usage
+  useEffect(() => {
+    if (window.umami && selectedDynasty !== 'All') {
+      window.umami.track('filter-dynasty', { dynasty: selectedDynasty });
+    }
+  }, [selectedDynasty]);
+
+  useEffect(() => {
+    if (window.umami && selectedGeo !== 'All') {
+      window.umami.track('filter-geo', { geo: selectedGeo });
+    }
+  }, [selectedGeo]);
+
   // Context value to pass down to Routes
   const contextValue = {
     allPosts,
