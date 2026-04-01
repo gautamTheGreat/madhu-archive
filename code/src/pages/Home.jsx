@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
+import { getMediaUrl } from '../utils/media';
 import GridTile from '../components/PostCard';
 import { Search, Map as MapIcon, Grid3X3 } from 'lucide-react';
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
@@ -75,7 +76,7 @@ export default function Home({ context }) {
       {heroPost && !isFiltering && (
         <div className="hero-section" onClick={() => openPost(heroPost)}>
           <img 
-            src={typeof heroPost.media[0] === 'string' ? heroPost.media[0] : (heroPost.media[0].publicUrl || heroPost.media[0].uri)} 
+            src={getMediaUrl(typeof heroPost.media[0] === 'string' ? heroPost.media[0] : (heroPost.media[0].publicUrl || heroPost.media[0].uri))} 
             alt="Hero Background" 
             className="hero-bg"
           />
@@ -219,7 +220,7 @@ export default function Home({ context }) {
                     <Popup>
                       <div style={{ width: 220, display: 'flex', flexDirection: 'column', gap: '8px' }}>
                         {imgSrc && !isVid && (
-                          <img src={imgSrc.startsWith('http') ? imgSrc : imgSrc.replace(/ /g, '%20')} alt="thumbnail" style={{ width: '100%', height: 130, objectFit: 'cover', borderRadius: 4 }} />
+                          <img src={getMediaUrl(imgSrc)} alt="thumbnail" style={{ width: '100%', height: 130, objectFit: 'cover', borderRadius: 4 }} />
                         )}
                         {imgSrc && isVid && (
                           <div style={{ width: '100%', height: 130, background: '#111', borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff' }}>Video</div>

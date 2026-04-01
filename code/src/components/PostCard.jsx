@@ -1,5 +1,5 @@
-import React from 'react';
 import { Images, Play } from 'lucide-react';
+import { getMediaUrl } from '../utils/media';
 
 export default function GridTile({ post, index, onClick }) {
   const { media, content } = post;
@@ -30,7 +30,7 @@ export default function GridTile({ post, index, onClick }) {
   const firstMediaItem = media[0];
   const firstMedia = typeof firstMediaItem === 'string' ? firstMediaItem : (firstMediaItem?.publicUrl || firstMediaItem?.uri || '');
   const isVideo = firstMedia.endsWith('.mp4') || firstMedia.endsWith('.mov') || firstMedia.endsWith('.webm');
-  const mediaSrc = firstMedia.startsWith('http') ? firstMedia : firstMedia.replace(/ /g, '%20');
+  const mediaSrc = getMediaUrl(firstMedia);
 
   return (
     <div

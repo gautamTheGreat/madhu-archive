@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { X, ChevronLeft, ChevronRight, Images, Play, Maximize2 } from 'lucide-react';
+import { getMediaUrl } from '../utils/media';
 
 import Lightbox from "yet-another-react-lightbox";
 import Zoom from "yet-another-react-lightbox/plugins/zoom";
@@ -68,11 +69,11 @@ export default function PostModal({ post, onClose }) {
   // Let's just feed it everything and it will show generic placeholder for videos, but we can just map simple objects.
   const lightboxSlides = media.map(m => {
     const src = typeof m === 'string' ? m : (m.publicUrl || m.uri || '');
-    return { src: src.startsWith('http') ? src : src.replace(/ /g, '%20'), type: (src.endsWith('.mp4') || src.endsWith('.mov')) ? 'video' : 'image' };
+    return { src: getMediaUrl(src), type: (src.endsWith('.mp4') || src.endsWith('.mov')) ? 'video' : 'image' };
   }).filter(m => m.type === 'image'); // filter to images only to keep the lightbox simple
 
   // Find index in lightbox array corresponding to current displayed media
-  const currentLightboxIndex = lightboxSlides.findIndex(slide => slide.src === (currentSrc.startsWith('http') ? currentSrc : currentSrc.replace(/ /g, '%20')));
+  const currentLightboxIndex = lightboxSlides.findIndex(slide => slide.src === getMediaUrl(currentSrc));
 
   return (
     <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-label="Post detail">
@@ -93,7 +94,7 @@ export default function PostModal({ post, onClose }) {
                 <video
                   key={currentSrc}
                   className="modal-main-video"
-                  src={currentSrc.startsWith('http') ? currentSrc : currentSrc.replace(/ /g, '%20')}
+                    src={getMediaUrl(currentSrc)}
                   controls
                   autoPlay
                   playsInline
@@ -103,7 +104,7 @@ export default function PostModal({ post, onClose }) {
                   <img
                     key={currentSrc}
                     className="modal-main-media"
-                    src={currentSrc.startsWith('http') ? currentSrc : currentSrc.replace(/ /g, '%20')}
+                      src={getMediaUrl(currentSrc)}
                     alt={`Photo ${activeIndex + 1} of ${media.length}`}
                     onClick={() => setIsLightboxOpen(true)}
                     style={{ cursor: 'zoom-in' }}
@@ -146,7 +147,7 @@ export default function PostModal({ post, onClose }) {
                           ) : (
                             <img
                               className="modal-thumb"
-                              src={src.startsWith('http') ? src : src.replace(/ /g, '%20')}
+                               src={getMediaUrl(src)}
                               alt={`Thumb ${i + 1}`}
                               loading="lazy"
                             />

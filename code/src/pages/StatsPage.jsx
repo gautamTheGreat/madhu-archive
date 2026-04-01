@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
+import { getMediaUrl } from '../utils/media';
 
 export default function StatsPage({ context }) {
   const { allPosts } = context;
@@ -135,7 +136,7 @@ export default function StatsPage({ context }) {
                 style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, overflow: 'hidden', cursor: 'pointer', transition: 'transform 0.2s', ':hover': { transform: 'translateY(-4px)' } }}
               >
                 {imgSrc && (
-                  <img src={imgSrc.startsWith('http') ? imgSrc : imgSrc.replace(/ /g, '%20')} alt="thumbnail" style={{ width: '100%', height: 180, objectFit: 'cover' }} />
+                  <img src={getMediaUrl(imgSrc)} alt="thumbnail" style={{ width: '100%', height: 180, objectFit: 'cover' }} />
                 )}
                 <div style={{ padding: '1.25rem' }}>
                   <div style={{ color: 'var(--accent)', fontWeight: 700, fontSize: '0.85rem', marginBottom: '0.5rem', textTransform: 'uppercase', letterSpacing: 1 }}>
