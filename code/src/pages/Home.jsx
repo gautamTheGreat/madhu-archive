@@ -129,20 +129,18 @@ export default function Home({ context }) {
         </div>
         
         <div className="filter-dropdowns">
-          <div className="filter-group view-toggle-group" style={{ flex: '0 0 auto', borderRight: '1px solid var(--border)', paddingRight: '1rem' }}>
+          <div className="filter-group view-toggle-group">
             <label>View Mode</label>
-            <div style={{ display: 'flex', gap: '0.5rem' }}>
+            <div className="view-toggle-btns">
               <button 
                 onClick={() => setViewMode('grid')}
                 className={`view-toggle-btn ${viewMode === 'grid' ? 'active' : ''}`}
-                style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.65rem 1rem', borderRadius: 6, border: '1px solid var(--border)', background: viewMode === 'grid' ? 'var(--text)' : 'var(--surface)', color: viewMode === 'grid' ? 'var(--bg)' : 'var(--text-muted)', cursor: 'pointer', fontWeight: 600, transition: 'all 0.2s' }}
               >
                 <Grid3X3 size={16} /> Grid
               </button>
               <button 
                 onClick={() => setViewMode('map')}
                 className={`view-toggle-btn ${viewMode === 'map' ? 'active' : ''}`}
-                style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.65rem 1rem', borderRadius: 6, border: '1px solid var(--border)', background: viewMode === 'map' ? 'var(--text)' : 'var(--surface)', color: viewMode === 'map' ? 'var(--bg)' : 'var(--text-muted)', cursor: 'pointer', fontWeight: 600, transition: 'all 0.2s' }}
               >
                 <MapIcon size={16} /> Map
               </button>
