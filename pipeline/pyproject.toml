@@ -1,0 +1,11 @@
+[project]
+name = "pipeline"
+version = "0.1.0"
+description = "Data pipeline to parse and enrich Facebook exports"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "google-generativeai>=0.8.0",
+    "python-dotenv>=1.0.0",
+    "requests>=2.31.0",
+]
