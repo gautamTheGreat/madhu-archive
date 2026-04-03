@@ -1198,3 +1198,183 @@ body {
     grid-template-columns: 1fr;
   }
 }
+
+/* ─── Timeline Range Slider ─── */
+.timeline-container {
+  margin: 1.5rem 0;
+  padding: 1.5rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+}
+
+.timeline-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2rem;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.timeline-labels {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.timeline-title {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--text-muted);
+}
+
+.year-label {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--accent);
+  background: var(--accent-dim);
+  padding: 0.2rem 0.6rem;
+  border-radius: 4px;
+}
+
+.undated-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.undated-toggle input {
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.range-slider-wrapper {
+  position: relative;
+  width: 100%;
+  height: 30px;
+  margin-bottom: 2.5rem;
+}
+
+.slider-track {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 100%;
+  height: 6px;
+  background: var(--surface2);
+  border-radius: 3px;
+  z-index: 1;
+}
+
+.slider-range-highlight {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 6px;
+  background: var(--accent);
+  border-radius: 3px;
+  z-index: 2;
+  opacity: 0.6;
+}
+
+.thumb {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 100%;
+  pointer-events: none;
+  appearance: none;
+  background: none;
+  z-index: 3;
+}
+
+.thumb::-webkit-slider-thumb {
+  pointer-events: auto;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--accent);
+  cursor: pointer;
+  box-shadow: 0 0 10px rgba(0,0,0,0.2);
+  transition: transform 0.1s;
+}
+
+.thumb::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+
+.dynasty-markers {
+  position: relative;
+  width: 100%;
+  height: 60px;
+  margin-top: 1rem;
+}
+
+.dynasty-marker-btn {
+  position: absolute;
+  top: 0;
+  background: none;
+  border: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  cursor: pointer;
+  transform: translateX(-50%);
+  z-index: 4;
+}
+
+.marker-dot {
+  width: 8px;
+  height: 8px;
+  background: var(--text-muted);
+  border-radius: 50%;
+  margin-bottom: 4px;
+  transition: all 0.2s;
+}
+
+.marker-label {
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  white-space: nowrap;
+  transition: all 0.2s;
+}
+
+.dynasty-marker-btn:hover .marker-dot {
+  background: var(--accent);
+  transform: scale(1.5);
+}
+
+.dynasty-marker-btn:hover .marker-label {
+  color: var(--text);
+  transform: translateY(2px);
+}
+
+@media (max-width: 600px) {
+  .timeline-container {
+    padding: 1rem;
+  }
+  .marker-label {
+    display: none; /* Hide labels on mobile to prevent overlap, dots remain functional */
+  }
+  .dynasty-marker-btn:hover .marker-label {
+    display: block;
+    position: absolute;
+    top: 15px;
+    background: var(--surface2);
+    padding: 2px 4px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+  }
+}
+

@@ -1,10 +1,1 @@
-const fs = require('fs');
-const data = JSON.parse(fs.readFileSync('./src/data/posts.json', 'utf8'));
-const posts = Array.isArray(data) ? data : (data.posts || []);
-console.log('Total posts:', posts.length);
-if (posts.length > 0) {
-  console.log('Keys:', Object.keys(posts[0]));
-  const sizes = posts.map(p => JSON.stringify(p).length);
-  const avg = sizes.reduce((a,b)=>a+b,0)/sizes.length;
-  console.log('Avg size per post:', avg);
-}
+const fs = require('fs'); const data = JSON.parse(fs.readFileSync('src/data/posts.json')); const ds = new Map(); data.posts.forEach(p => { if(!p.dynasty) return; if(!ds.has(p.dynasty)) ds.set(p.dynasty, {starts: []}); if(p.historical_period && p.historical_period.start_year) { let sy = p.historical_period.start_year; if(p.historical_period.start_era === 'BC' || p.historical_period.start_era === 'BCE') sy = -sy; ds.get(p.dynasty).starts.push(sy); } }); const summary = Array.from(ds.entries()).map(([d, times]) => { const v = times.starts; if(v.length===0) return {dynasty: d, min: 'NA', max: 'NA'}; return {dynasty: d, min: Math.min(...v), max: Math.max(...v)}; }).sort((a,b)=>a.min==='NA'?1:b.min==='NA'?-1:a.min-b.min); summary.forEach(s => console.log(s.dynasty+': '+s.min+' - '+s.max));

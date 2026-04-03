@@ -2,40 +2,22 @@
 """
 enrich_posts.py
 
-Calls the Gemini LLM to extract structured metadata from each post's text,
-then geocodes the resolved location names via OpenStreetMap Nominatim.
-
-Optimisations:
-  - Parallel Gemini API calls via ThreadPoolExecutor (network I/O-bound).
-  - Per-post disk cache in pipeline/cache/<post_id>.json  — re-runs are free;
-    only posts without a cache file hit the API.
-  - Unique-location deduplication before geocoding (many posts share the same
-    temple location so we only call Nominatim once per unique place string).
-  - Nominatim rate-limit (1 req/sec) enforced via a threading.Lock + sleep.
-  - Geocode results are also cached in pipeline/cache/geo_<key>.json.
-
-Prerequisites:
-    pip install -r requirements.txt
-    set GEMINI_API_KEY=your_key_here   (Windows)
-    # OR
-    export GEMINI_API_KEY=your_key_here  (macOS/Linux)
-
-Run (from project root or pipeline/ folder):
-    python pipeline/enrich_posts.py
+Service-oriented enrichment pipeline refactored for Asynchronous Layered Processing.
+Optimized for Groq Free Tier (30 RPM) and Nominatim (1 request/sec).
 """
 
+import argparse
+import asyncio
 import json
 import os
 import re
-import shutil
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+from config_utils import sync_archive_config
 
-import google.generativeai as genai
-import requests
+import httpx
+from groq import AsyncGroq
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -44,85 +26,75 @@ load_dotenv()
 # Config
 # ──────────────────────────────────────────────────────────────────────────────
 
-PIPELINE_DIR  = Path(__file__).parent
-CACHE_DIR     = PIPELINE_DIR / 'cache'
-OUTPUT_DIR    = PIPELINE_DIR / 'output'
-RAW_JSON      = OUTPUT_DIR / 'posts_raw.json'
-ENRICHED_JSON = OUTPUT_DIR / 'posts_enriched.json'
-SITE_DATA     = PIPELINE_DIR.parent / 'code' / 'src' / 'data' / 'posts.json'
+PIPELINE_DIR    = Path(__file__).parent
+CACHE_DIR       = PIPELINE_DIR / 'cache'
+ARTIFACTS_DIR   = CACHE_DIR / 'artifacts'
+OUTPUT_DIR      = PIPELINE_DIR / 'output'
+RAW_JSON        = OUTPUT_DIR / 'posts_raw.json'
+ENRICHED_JSON   = OUTPUT_DIR / 'posts_enriched.json'
+SITE_DATA       = PIPELINE_DIR.parent / 'code' / 'src' / 'data' / 'posts.json'
+ARCHIVE_CONFIG  = PIPELINE_DIR.parent / 'code' / 'src' / 'data' / 'archive_config.json'
 
-CACHE_DIR.mkdir(exist_ok=True)
+ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-GEMINI_MODEL   = 'gemini-flash-latest'
-MAX_WORKERS    = 10          # parallel Gemini threads
-CONTENT_LIMIT  = 5000        # max chars of post text sent to Gemini
+GROQ_MODEL      = 'llama-3.3-70b-versatile'
+CONTENT_LIMIT   = 6000
 
-NOMINATIM_URL  = 'https://nominatim.openstreetmap.org/search'
-NOMINATIM_UA   = 'madhu-jagdhish-archive/1.0 (temple sculpture archive)'
+NOMINATIM_URL   = 'https://nominatim.openstreetmap.org/search'
+NOMINATIM_UA    = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
+WIKI_API_URL    = 'https://en.wikipedia.org/w/api.php'
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Gemini setup
-# ──────────────────────────────────────────────────────────────────────────────
-
-api_key = os.environ.get('GEMINI_API_KEY')
-if not api_key:
-    raise EnvironmentError(
-        'GEMINI_API_KEY environment variable not set. Please set it in pipeline/.env'
-    )
-
-genai.configure(api_key=api_key)
-model = genai.GenerativeModel(
-    GEMINI_MODEL,
-    generation_config=genai.GenerationConfig(
-        response_mime_type='application/json',
-        temperature=0.1,        # low temperature → consistent structured output
-    ),
-)
+# Rate Limiting Semaphores
+WIKI_SEMA = asyncio.Semaphore(10)
+LLM_SEMA  = asyncio.Semaphore(1)  # Free Tier: 30 RPM = 1 request per 2 seconds
+GEO_SEMA  = asyncio.Semaphore(1)  # Nominatim: 1 request per second
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Prompt template
+# Prompt Template
 # ──────────────────────────────────────────────────────────────────────────────
 
 PROMPT_TEMPLATE = """\
 You are an expert on Indian temple architecture, sculpture, and South/Southeast Asian history.
 
-Analyse the Facebook post below (written by Madhu Jagdhish, a temple sculpture enthusiast) \
-and extract the following fields as a single JSON object.
+Your task is to extract structured metadata from a Facebook post.
+We have provided a Wikipedia extract for the likely temple or site.
 
-Return ONLY valid JSON with exactly these keys. Use null for any field you cannot determine.
+CRITICAL INSTRUCTIONS:
+1. WIKIPEDIA IS THE GROUND TRUTH: If Wikipedia provides a dynasty, historical period, or location, USE THAT DATA.
+2. SUPPORT MULTIPLE DYNASTIES: Return dynasties as a LIST. Include all relevant dynasties (e.g. ["Pallava", "Chola"]).
+3. SYNTHESIZE: Use the Facebook post for specific artistic details, observations about sculptures, and the local context.
+4. CONFLICTS: If there is a conflict between Wikipedia and the post text for Dynasty or Period, use Wikipedia.
+5. SUMMARY: Provide a 2-sentence summary that synthesizes both sets of information.
 
+EXTRACT AS JSON:
 {{
-  "temple_name": "Primary temple or monument name (string or null)",
-  "alternate_names": ["Other known names / local names for the same structure"],
-  "deity": "Primary deity or function, e.g. Shiva, Vishnu, Jain, Buddhist stupa (string or null)",
-  "dynasty": "Ruling dynasty responsible for construction, e.g. Chola, Pallava, Hoysala, Khmer (string or null)",
-  "architectural_style": "e.g. Dravidian, Nagara, Vesara, Khmer (string or null)",
+  "temple_name": "Primary temple name from Wikipedia if available, else from post",
+  "alternate_names": ["Other known names"],
+  "deity": "Primary deity (string or null)",
+  "dynasties": ["List", "of", "contributing", "dynasties"],
+  "architectural_style": "e.g. Dravidian, Nagara, Khmer (string or null)",
   "historical_period": {{
-    "label": "Human-readable era, e.g. '11th century CE', 'Late Chola period' (string or null)",
-    "start_year": <integer or null>,
-    "start_era": "'CE' or 'BC' (string or null)",
-    "end_year": <integer or null>,
-    "end_era": "'CE' or 'BC' (string or null)"
+    "label": "e.g. '11th century CE' (string or null)",
+    "start_year": <int or null>, "start_era": "CE/BC",
+    "end_year": <int or null>, "end_era": "CE/BC"
   }},
   "construction_duration": {{
-    "min_years": <integer or null>,
-    "max_years": <integer or null>,
-    "label": "e.g. '5 to 10 years', 'around 25 years' (string or null)"
+    "min_years": <int or null>, "max_years": <int or null>, "label": "string or null"
   }},
   "location": {{
-    "place_name": "Specific city, town, or site name (string or null)",
-    "district":   "District if mentioned (string or null)",
-    "state":      "State or province (string or null)",
-    "country":    "Country name (string or null)"
+    "place_name": "string or null", "district": "string or null",
+    "state": "string or null", "country": "string or null"
   }},
-  "summary": "2-sentence plain English summary of what the post is about (string or null)",
-  "tags": ["relevant semantic tags — include hashtags from text plus additional descriptive tags"],
-  "confidence": "Your overall confidence in the extracted data: 'high', 'medium', or 'low'"
+  "summary": "2-sentence synthesis (plain English)",
+  "tags": ["relevant semantic tags"],
+  "confidence": "high/medium/low based on Wikipedia match quality"
 }}
 
+WIKIPEDIA CONTEXT:
+{wiki_context}
+
 POST TITLE: {title}
-POST HASHTAGS: {hashtags}
 POST TEXT:
 {content}
 """
@@ -135,276 +107,295 @@ def ts_log(msg: str) -> None:
     t = datetime.now().strftime('%H:%M:%S')
     print(f'[{t}] {msg}', flush=True)
 
-
-def post_cache_path(post_id: str) -> Path:
-    return CACHE_DIR / f'{post_id}.json'
-
-
-def geo_cache_path(query: str) -> Path:
-    safe = re.sub(r'[^\w]', '_', query.lower())[:80]
-    return CACHE_DIR / f'geo_{safe}.json'
-
-
-def load_json_cache(path: Path):
+def load_json_file(path: Path):
     if path.exists():
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            pass
+        except: pass
     return None
 
-
-def save_json_cache(path: Path, data: dict) -> None:
+def save_json_file(path: Path, data: dict) -> None:
     try:
         with open(path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False)
+            json.dump(data, f, ensure_ascii=False, indent=2)
     except OSError as e:
-        ts_log(f'⚠  Cache write failed {path}: {e}')
-
+        ts_log(f'⚠ File write failed: {e}')
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Gemini enrichment  (called in parallel threads)
+# Service logic (Async)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def enrich_post(post: dict) -> tuple:
-    """
-    Call Gemini for one post.  Returns (post_id, result_dict).
-    Checks disk cache first; only hits the API on a cache miss.
-    Thread-safe: genai SDK + file I/O are both safe across threads.
-    """
-    post_id = post['id']
-    cp      = post_cache_path(post_id)
-
-    cached = load_json_cache(cp)
-    if cached is not None:
-        return post_id, cached
-
-    prompt = PROMPT_TEMPLATE.format(
-        title    = post.get('title', '') or '',
-        hashtags = ', '.join(post.get('hashtags') or []),
-        content  = (post.get('content') or '')[:CONTENT_LIMIT],
-    )
-
-    retries = 3
-    for attempt in range(1, retries + 1):
+async def service_wikipedia(query: str, fallback_query: str = None, client: httpx.AsyncClient = None) -> dict:
+    if not query or len(query) < 3:
+        if fallback_query: return await service_wikipedia(fallback_query, None, client)
+        return None
+    
+    query = "".join(c for c in query if c.isprintable()).strip()
+    async with WIKI_SEMA:
         try:
-            response = model.generate_content(prompt)
-            result   = json.loads(response.text)
-            save_json_cache(cp, result)
-            return post_id, result
-        except json.JSONDecodeError as e:
-            ts_log(f'⚠  JSON parse error for {post_id} (attempt {attempt}): {e}')
-            result = {'confidence': 'low', '_error': f'json_decode: {e}'}
+            # Step 1: OpenSearch for Discovery
+            os_params = {'action': 'opensearch', 'search': query, 'limit': 1, 'format': 'json'}
+            resp = await client.get(WIKI_API_URL, params=os_params, timeout=10)
+            os_data = resp.json()
+            
+            if not os_data[1]:
+                if fallback_query and fallback_query != query:
+                    return await service_wikipedia(fallback_query, None, client)
+                return None
+                
+            best_title = os_data[1][0]
+            site_url = os_data[3][0]
+
+            # Step 2: Query for Content
+            q_params = {
+                'action': 'query', 'prop': 'extracts|coordinates', 
+                'titles': best_title, 'explaintext': 1, 'format': 'json', 'redirects': 1
+            }
+            resp = await client.get(WIKI_API_URL, params=q_params, timeout=10)
+            pages = resp.json().get('query', {}).get('pages', {})
+            pid = next(iter(pages))
+            if pid == "-1": return None
+            page = pages[pid]
+            
+            coords = page.get('coordinates', [{}])[0]
+            return {
+                'title': page['title'],
+                'extract': page.get('extract', '')[:12000],
+                'url': site_url,
+                'lat': coords.get('lat'),
+                'lon': coords.get('lon'),
+                'ts': datetime.now(timezone.utc).isoformat()
+            }
         except Exception as e:
-            if attempt < retries:
-                time.sleep(2 ** attempt)   # exponential back-off
-            else:
-                ts_log(f'⚠  Gemini failed for {post_id} after {retries} attempts: {e}')
-                result = {'confidence': 'low', '_error': str(e)}
+            ts_log(f"   ⚠ Wikipedia error ({query}): {e}")
+            return None
 
-    save_json_cache(cp, result)
-    return post_id, result
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Nominatim geocoding  (serial, rate-limited to 1 req/sec)
-# ──────────────────────────────────────────────────────────────────────────────
-
-_nominatim_lock     = threading.Lock()
-_last_nominatim_req = 0.0
-
-
-def geocode(place_name: str, state: str | None, country: str | None) -> tuple:
-    """
-    Resolve a place name to (lat, lng) using OpenStreetMap Nominatim.
-    Rate-limited to 1 request/second as required by Nominatim's ToS.
-    Both hits and misses are cached to disk.
-    Returns (lat, lng) or (None, None).
-    """
-    parts   = [p for p in [place_name, state, country] if p]
-    query   = ', '.join(parts)
-    gcp     = geo_cache_path(query)
-    cached  = load_json_cache(gcp)
-    if cached is not None:
-        return cached.get('lat'), cached.get('lng')
-
-    global _last_nominatim_req
-    with _nominatim_lock:
-        # Enforce minimum 1.1s between requests
-        elapsed = time.time() - _last_nominatim_req
-        if elapsed < 1.1:
-            time.sleep(1.1 - elapsed)
-
+async def service_llm(prompt: str, client: AsyncGroq) -> dict:
+    async with LLM_SEMA:
+        await asyncio.sleep(2.1) # Respect Free Tier 30 RPM
         try:
-            resp = requests.get(
-                NOMINATIM_URL,
-                params={'q': query, 'format': 'json', 'limit': 1},
-                headers={'User-Agent': NOMINATIM_UA},
-                timeout=10,
+            completion = await client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model=GROQ_MODEL,
+                response_format={"type": "json_object"},
+                temperature=0.1
             )
-            _last_nominatim_req = time.time()
-            results = resp.json()
-            if results:
-                lat = float(results[0]['lat'])
-                lng = float(results[0]['lon'])
-                save_json_cache(gcp, {'lat': lat, 'lng': lng, 'query': query})
-                return lat, lng
+            return {
+                **json.loads(completion.choices[0].message.content),
+                '_model': GROQ_MODEL,
+                '_ts': datetime.now(timezone.utc).isoformat()
+            }
         except Exception as e:
-            ts_log(f'⚠  Geocode error "{query}": {e}')
-            _last_nominatim_req = time.time()
+            return {"_error": str(e)}
 
-    save_json_cache(gcp, {'lat': None, 'lng': None, 'query': query})
-    return None, None
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Main
-# ──────────────────────────────────────────────────────────────────────────────
-
-ts_log(f'Loading {RAW_JSON} ...')
-with open(RAW_JSON, 'r', encoding='utf-8') as f:
-    raw = json.load(f)
-
-posts = raw['posts']
-needs_enrichment = [p for p in posts if p.get('content') or p.get('title')]
-already_cached   = sum(1 for p in needs_enrichment if post_cache_path(p['id']).exists())
-api_calls_needed = len(needs_enrichment) - already_cached
-
-ts_log(f'  {len(posts)} total posts.')
-ts_log(f'  {len(needs_enrichment)} have text content → will enrich.')
-ts_log(f'  {already_cached} already cached → {api_calls_needed} API calls needed.')
-print()
-
-# ── Phase 1: Parallel Gemini calls ────────────────────────────────────────────
-
-ts_log(f'Starting Gemini enrichment ({MAX_WORKERS} parallel workers) ...')
-enrichment_map: dict = {}
-errors = 0
-
-with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-    futures = {pool.submit(enrich_post, p): p['id'] for p in needs_enrichment}
-    done = 0
-    for fut in as_completed(futures):
-        post_id = futures[fut]
-        done += 1
-        try:
-            pid, result = fut.result()
-            enrichment_map[pid] = result
-        except Exception as e:
-            ts_log(f'⚠  Unexpected error for {post_id}: {e}')
-            enrichment_map[post_id] = {'confidence': 'low', '_error': str(e)}
-            errors += 1
-
-        if done % 100 == 0 or done == len(needs_enrichment):
-            pct = round(done / len(needs_enrichment) * 100)
-            ts_log(f'  Gemini: {done}/{len(needs_enrichment)} ({pct}%) — errors so far: {errors}')
-
-print()
-ts_log(f'Gemini phase complete. Total errors: {errors}')
-print()
-
-# ── Phase 2: Geocoding (serial, rate-limited) ─────────────────────────────────
-
-# Collect unique location tuples to minimise Nominatim requests
-unique_locations: dict = {}   # geo_query_key → (place_name, state, country)
-
-for post in posts:
-    enriched = enrichment_map.get(post['id']) or {}
-    loc      = (enriched.get('location') or {})
-    place    = loc.get('place_name')
-    state    = loc.get('state')
-    country  = loc.get('country')
+async def service_geocoding(place, district, state, country, client: httpx.AsyncClient):
+    if not place and not district and not state: return None
+    
+    queries = []
     if place:
-        key = ', '.join(p for p in [place, state, country] if p)
-        unique_locations[key] = (place, state, country)
+        queries.append(', '.join([p for p in [place, district, state, country] if p]))
+    if district:
+        queries.append(', '.join([p for p in [district, state, country] if p]))
+    elif state:
+        queries.append(', '.join([p for p in [state, country] if p]))
+    
+    seen = set()
+    unique_queries = []
+    for q in queries:
+        if q and q not in seen:
+            unique_queries.append(q)
+            seen.add(q)
 
-ts_log(f'Geocoding {len(unique_locations)} unique locations via Nominatim (rate-limited 1 req/s) ...')
-geo_results: dict = {}   # geo_query_key → (lat, lng)
-geo_done = 0
+    for i, query in enumerate(unique_queries):
+        async with GEO_SEMA:
+            await asyncio.sleep(1.5) # Nominatim policy
+            try:
+                ts_log(f"   Geocoding attempt {i+1}: {query}")
+                r = await client.get(NOMINATIM_URL, params={'q': query, 'format': 'json', 'limit': 1}, timeout=10)
+                data = r.json()
+                if data:
+                    return {
+                        'lat': float(data[0]['lat']),
+                        'lng': float(data[0]['lon']),
+                        'display_name': data[0].get('display_name'),
+                        'query': query,
+                        'source': 'nominatim',
+                        'level': 'place' if (i == 0 and place) else 'fallback',
+                        'ts': datetime.now(timezone.utc).isoformat()
+                    }
+            except Exception as e:
+                ts_log(f"   ⚠ Geocoding error ({query}): {e}")
+                
+    return {'lat': None, 'lng': None, 'query': unique_queries[0] if unique_queries else 'N/A', 'ts': datetime.now(timezone.utc).isoformat()}
 
-for key, (place, state, country) in unique_locations.items():
-    lat, lng = geocode(place, state, country)
-    geo_results[key] = (lat, lng)
-    geo_done += 1
-    if geo_done % 20 == 0 or geo_done == len(unique_locations):
-        pct = round(geo_done / max(len(unique_locations), 1) * 100)
-        ts_log(f'  Geo: {geo_done}/{len(unique_locations)} ({pct}%)')
+# ──────────────────────────────────────────────────────────────────────────────
+# Pipeline Orchestration
+# ──────────────────────────────────────────────────────────────────────────────
 
-print()
+def extract_search_terms(post: dict) -> tuple:
+    content = post.get('content', '') or ''
+    place_match = re.search(r'PLACE:\s*(.+)$', content, re.MULTILINE | re.IGNORECASE)
+    if place_match:
+        full = re.sub(r'#.*$', '', place_match.group(1)).strip()
+        best = re.split(r'[,|:]', full)[0].strip()
+        return best, full
+    
+    lines = [L.strip() for L in content.split('\n') if L.strip()]
+    best = None
+    if lines and not lines[0].startswith('#'):
+        parts = re.split(r'[:|–\-]', lines[0])
+        best = re.sub(r'\s+TEMPLE\s*$', '', parts[0].strip(), flags=re.IGNORECASE)
+    
+    fallback = None
+    hashtags = post.get('hashtags', [])
+    for ht in hashtags:
+        tag = ht.replace('#', '')
+        if tag.lower() not in ['sculptureenthusiast', 'shiva', 'vishnu', 'temple', 'heritage', 'incredibleindia', 'tamilnadutourism', 'cambodia', 'banteaysrei']:
+            fallback = f"{best} {tag}" if best else tag
+            break
+    return best, fallback
 
-# ── Phase 3: Merge enrichments into post objects ──────────────────────────────
+async def process_service_layers(post: dict, force: bool, http_client: httpx.AsyncClient, groq_client: AsyncGroq):
+    pid = post['id']
+    adir = ARTIFACTS_DIR / pid
+    adir.mkdir(exist_ok=True, parents=True)
+    
+    u_path = adir / 'unified.json'
+    if not force and u_path.exists():
+        return pid, load_json_file(u_path)
 
-ts_log('Merging enrichments ...')
-for post in posts:
-    enriched = enrichment_map.get(post['id'])
-    if not enriched:
-        continue
+    ts_log(f"Processing {pid} ...")
+    
+    # 1. Metadata
+    m_path = adir / 'metadata.json'
+    best_q, fallback_q = extract_search_terms(post)
+    meta = {'id': pid, 'search_term': best_q, 'fallback_term': fallback_q, 'ts_start': datetime.now(timezone.utc).isoformat()}
+    save_json_file(m_path, meta)
 
-    loc     = (enriched.get('location') or {})
-    place   = loc.get('place_name')
-    state   = loc.get('state')
-    country = loc.get('country')
-    geo_key = ', '.join(p for p in [place, state, country] if p) if place else None
-    lat, lng = geo_results.get(geo_key, (None, None)) if geo_key else (None, None)
+    # 2. Layer: Wikipedia (Discovery)
+    w_path = adir / 'wikipedia.json'
+    wiki = load_json_file(w_path) if not force else None
+    if not wiki:
+        wiki = await service_wikipedia(best_q, fallback_q, http_client)
+        if wiki: save_json_file(w_path, wiki)
 
-    # Merge tags: raw hashtags (already in post) + new LLM tags, deduplicated
-    existing_tags = set(post.get('hashtags') or [])
-    llm_tags      = [t for t in (enriched.get('tags') or []) if t not in existing_tags]
-    merged_tags   = sorted(existing_tags) + llm_tags
+    # 3. Layer: LLM (Synthesis)
+    l_path = adir / 'llm.json'
+    llm = load_json_file(l_path) if not force else None
+    if not llm or '_error' in llm:
+        ctx = f"Wikipedia: {wiki['title']}\nURL: {wiki['url']}\nCONTENT:\n{wiki['extract']}" if wiki else "No Wikipedia data found."
+        prompt = PROMPT_TEMPLATE.format(title=post.get('title',''), content=(post.get('content') or '')[:CONTENT_LIMIT], wiki_context=ctx)
+        llm = await service_llm(prompt, groq_client)
+        save_json_file(l_path, llm)
 
-    post.update({
-        'enriched':             True,
-        'temple_name':          enriched.get('temple_name'),
-        'alternate_names':      enriched.get('alternate_names') or [],
-        'deity':                enriched.get('deity'),
-        'dynasty':              enriched.get('dynasty'),
-        'architectural_style':  enriched.get('architectural_style'),
-        'historical_period':    enriched.get('historical_period'),
-        'construction_duration': enriched.get('construction_duration'),
-        'location': {
-            'place_name': place,
-            'district':   loc.get('district'),
-            'state':      state,
-            'country':    country,
-            'lat':        lat,
-            'lng':        lng,
-        } if place else None,
-        'summary':    enriched.get('summary'),
-        'tags':       merged_tags,
-        'confidence': enriched.get('confidence'),
-    })
+    # 4. Layer: Geocoding (Placement)
+    g_path = adir / 'geocoding.json'
+    geo = load_json_file(g_path) if not force else None
+    if not geo or geo.get('lat') is None:
+        if wiki and wiki.get('lat') is not None:
+            geo = {'lat': wiki['lat'], 'lng': wiki['lon'], 'source': 'wikipedia', 'level': 'place', 'ts': datetime.now(timezone.utc).isoformat()}
+        else:
+            loc = llm.get('location') or {}
+            geo = await service_geocoding(loc.get('place_name'), loc.get('district'), loc.get('state'), loc.get('country'), http_client)
+        if geo: save_json_file(g_path, geo)
 
-# ── Phase 4: Write outputs ────────────────────────────────────────────────────
+    # 5. Synthesis
+    unified = {
+        'metadata': meta,
+        'wikipedia': wiki,
+        'llm': llm,
+        'geocoding': geo,
+        'ts_end': datetime.now(timezone.utc).isoformat()
+    }
+    save_json_file(u_path, unified)
+    ts_log(f"   ✓ Unified {pid}")
+    return pid, unified
 
-# posts_enriched.json — full raw structure + enriched posts (for debugging)
-enriched_output = {**raw, 'posts': posts}
-ts_log(f'Writing {ENRICHED_JSON} ...')
-with open(ENRICHED_JSON, 'w', encoding='utf-8') as f:
-    json.dump(enriched_output, f, ensure_ascii=False, indent=2)
+async def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--limit', '-l', type=int, default=0)
+    parser.add_argument('--force', '-f', action='store_true')
+    args = parser.parse_args()
 
-# posts.json — the flat array read by the website
-ts_log(f'Writing {SITE_DATA} ...')
-SITE_DATA.parent.mkdir(parents=True, exist_ok=True)
-with open(SITE_DATA, 'w', encoding='utf-8') as f:
-    json.dump(posts, f, ensure_ascii=False, indent=2)
+    ts_log(f'Loading {RAW_JSON}...')
+    if not RAW_JSON.exists():
+        ts_log(f"⚠ ERROR: {RAW_JSON} not found. Run parse_export.py first.")
+        return
 
-# ── Summary ───────────────────────────────────────────────────────────────────
+    with open(RAW_JSON, 'r', encoding='utf-8') as f:
+        raw = json.load(f)
+    
+    posts = raw['posts']
+    needs = [p for p in posts if p.get('content') or p.get('title')]
+    
+    if args.force: to_process = needs
+    else: to_process = [p for p in needs if not (ARTIFACTS_DIR / p['id'] / 'unified.json').exists()]
+    if args.limit > 0: to_process = to_process[:args.limit]
 
-enriched_count = sum(1 for p in posts if p.get('enriched'))
-geo_count      = sum(1 for p in posts if (p.get('location') or {}).get('lat'))
-size_enriched  = ENRICHED_JSON.stat().st_size // 1024
-size_site      = SITE_DATA.stat().st_size // 1024
+    ts_log(f'Enriching {len(to_process)} posts (Layered Async)...')
+    emap = {}
+    
+    # Load existing artifacts for non-processed posts
+    for p in needs:
+        upath = ARTIFACTS_DIR / p['id'] / 'unified.json'
+        if upath.exists() and p['id'] not in [x['id'] for x in to_process]:
+            emap[p['id']] = load_json_file(upath)
 
-print()
-print('══════════════════════════════════════════')
-print('  Enrichment complete! Summary:')
-print('══════════════════════════════════════════')
-print(f'  Posts total          : {len(posts)}')
-print(f'  Posts enriched       : {enriched_count}')
-print(f'  Posts with location  : {geo_count} (with lat/lng resolved)')
-print(f'  Gemini errors        : {errors}')
-print(f'  Cached responses     : {len(list(CACHE_DIR.glob("*.json"))) - len(unique_locations)} LLM + {len(unique_locations)} geo')
-print(f'  Enriched JSON        : {size_enriched} KB → {ENRICHED_JSON}')
-print(f'  Site posts.json      : {size_site} KB → {SITE_DATA}')
-print('══════════════════════════════════════════')
+    if to_process:
+        api_key = os.environ.get('GROQ_API_KEY')
+        headers = {'User-Agent': NOMINATIM_UA}
+        async with httpx.AsyncClient(headers=headers) as http_client, AsyncGroq(api_key=api_key) as groq_client:
+            tasks = [process_service_layers(p, args.force, http_client, groq_client) for p in to_process]
+            results = await asyncio.gather(*tasks)
+            for pid, res in results:
+                emap[pid] = res
+
+    # Final merge
+    for p in posts:
+        u = emap.get(p['id'])
+        if not u: continue
+        
+        wiki = u.get('wikipedia') or {}
+        en   = u.get('llm') or {}
+        geo  = u.get('geocoding') or {}
+        loc  = en.get('location') or {}
+        
+        dyn = en.get('dynasties') or en.get('dynasty')
+        if isinstance(dyn, str): dyn = [d.strip() for d in dyn.split(',')]
+        if not isinstance(dyn, list): dyn = []
+
+        etags = set(p.get('hashtags') or [])
+        ltags = [t for t in (en.get('tags') or []) if t not in etags]
+
+        p.update({
+            'enriched': True,
+            'temple_name': en.get('temple_name'),
+            'alternate_names': en.get('alternate_names') or [],
+            'deity': en.get('deity'),
+            'dynasty': ", ".join(dyn) if dyn else None,
+            'dynasties': dyn,
+            'architectural_style': en.get('architectural_style'),
+            'historical_period': en.get('historical_period'),
+            'construction_duration': en.get('construction_duration'),
+            'wikipedia_link': wiki.get('url'),
+            'location': {
+                'place_name': loc.get('place_name'), 'district': loc.get('district'),
+                'state': loc.get('state'), 'country': loc.get('country'),
+                'lat': geo.get('lat'), 'lng': geo.get('lng')
+            } if loc.get('place_name') or geo.get('lat') else None,
+            'summary': en.get('summary'),
+            'tags': sorted(list(etags)) + ltags,
+            'confidence': en.get('confidence'),
+        })
+
+    with open(ENRICHED_JSON, 'w', encoding='utf-8') as f:
+        json.dump({**raw, 'posts': posts}, f, ensure_ascii=False, indent=2)
+    with open(SITE_DATA, 'w', encoding='utf-8') as f:
+        json.dump(posts, f, ensure_ascii=False, indent=2)
+    
+    sync_archive_config(SITE_DATA, ARCHIVE_CONFIG)
+    ts_log("Done.")
+
+if __name__ == '__main__':
+    asyncio.run(main())

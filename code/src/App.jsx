@@ -3,6 +3,7 @@ import { Routes, Route, useNavigate, useLocation } from 'react-router-dom';
 import Fuse from 'fuse.js';
 
 import rawPostsData from './data/posts.json';
+import config from './data/archive_config.json';
 import RootLayout from './layouts/RootLayout';
 import Home from './pages/Home';
 import StatsPage from './pages/StatsPage';
@@ -13,7 +14,11 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedDynasty, setSelectedDynasty] = useState('All');
   const [selectedGeo, setSelectedGeo] = useState('All');
-  const [selectedSort, setSelectedSort] = useState('shuffle');
+  const [selectedSort, setSelectedSort] = useState(config.ui.filtering.defaultSort || 'shuffle');
+
+  // Year range filtering state
+  const [yearRange, setYearRange] = useState([config.history.minYear, config.history.maxYear]);
+  const [includeUndated, setIncludeUndated] = useState(true);
 
   const location = useLocation();
   const navigate = useNavigate();
@@ -28,21 +33,49 @@ function App() {
   const fuse = useMemo(() => {
     return new Fuse(allPosts, {
       keys: ['content', 'summary', 'temple_name', 'alternate_names', 'tags', 'hashtags', 'location.place_name', 'location.state', 'dynasty'],
-      threshold: 0.3,
+      threshold: config.ui.filtering.fuseThreshold || 0.3,
     });
   }, [allPosts]);
 
   // Derived unique lists for dropdowns
   const filterOptions = useMemo(() => {
-    const dynasties = new Set();
+    const dynastiesMap = new Map();
     const geos = new Set();
     allPosts.forEach(p => {
-      if (p.dynasty) dynasties.add(p.dynasty);
+      if (p.dynasty) {
+        if (!dynastiesMap.has(p.dynasty)) dynastiesMap.set(p.dynasty, { starts: [] });
+        if (p.historical_period && p.historical_period.start_year != null) {
+          let sy = p.historical_period.start_year;
+          if (p.historical_period.start_era === "BC" || p.historical_period.start_era === "BCE") sy = -sy;
+          dynastiesMap.get(p.dynasty).starts.push(sy);
+        }
+      }
       if (p.location?.state) geos.add(p.location.state);
       else if (p.location?.country) geos.add(p.location.country);
     });
+
+    const formatYear = (y) => y < 0 ? `${Math.abs(y)} BC` : `${y} CE`;
+
+    const dynastiesArray = Array.from(dynastiesMap.entries()).map(([name, data]) => {
+      const starts = data.starts;
+      const min = starts.length > 0 ? Math.min(...starts) : null;
+      const max = starts.length > 0 ? Math.max(...starts) : null;
+      
+      let labelRange = "N/A";
+      if (starts.length > 0) {
+        labelRange = min === max ? formatYear(min) : `${formatYear(min)} - ${formatYear(max)}`;
+      }
+      
+      return { name, min, max, labelRange };
+    }).sort((a, b) => {
+      if (a.min === null && b.min !== null) return 1;
+      if (b.min === null && a.min !== null) return -1;
+      if (a.min !== null && b.min !== null) return a.min - b.min;
+      return a.name.localeCompare(b.name);
+    });
+
     return {
-      dynasties: Array.from(dynasties).sort(),
+      dynasties: dynastiesArray,
       geos: Array.from(geos).sort()
     };
   }, [allPosts]);
@@ -65,11 +98,19 @@ function App() {
       );
     }
 
+    // 4. Year Range Filtering
+    result = result.filter(p => {
+      if (p.historical_period && p.historical_period.start_year != null) {
+        let sy = p.historical_period.start_year;
+        if (p.historical_period.start_era === "BC" || p.historical_period.start_era === "BCE") sy = -sy;
+        return sy >= yearRange[0] && sy <= yearRange[1];
+      }
+      return includeUndated;
+    });
+
     // Sort Logic
     if (selectedSort === 'shuffle') {
-      // Deterministic shuffle algorithm based on post IDs so it doesn't jump around on every re-render
-      // But for a true shuffle on load, we can just pseudo-randomize it once or base it on length.
-      // A simple deterministic hash shuffle:
+      // Deterministic shuffle algorithm based on post IDs
       result.sort((a, b) => {
         const hashA = a.id.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
         const hashB = b.id.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
@@ -93,7 +134,7 @@ function App() {
     }
 
     return result;
-  }, [allPosts, fuse, searchQuery, selectedDynasty, selectedGeo, selectedSort]);
+  }, [allPosts, fuse, searchQuery, selectedDynasty, selectedGeo, selectedSort, yearRange, includeUndated]);
 
   const toggleTheme = () => setTheme(prev => prev === 'dark' ? 'light' : 'dark');
 
@@ -138,7 +179,12 @@ function App() {
     setSelectedGeo,
     selectedSort,
     setSelectedSort,
-    theme
+    yearRange,
+    setYearRange,
+    includeUndated,
+    setIncludeUndated,
+    theme,
+    config
   };
 
   // We maintain previousLocation so the background stays intact when opening the modal

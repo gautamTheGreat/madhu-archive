@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { getMediaUrl } from '../utils/media';
 import GridTile from '../components/PostCard';
+import TimelineSlider from '../components/TimelineSlider';
 import { Search, Map as MapIcon, Grid3X3 } from 'lucide-react';
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import MarkerClusterGroup from 'react-leaflet-cluster';
@@ -16,8 +17,6 @@ L.Icon.Default.mergeOptions({
   shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
 });
 
-const PAGE_SIZE = 60;
-
 export default function Home({ context }) {
   const { 
     allPosts, filteredPosts, 
@@ -26,10 +25,14 @@ export default function Home({ context }) {
     selectedDynasty, setSelectedDynasty,
     selectedGeo, setSelectedGeo,
     selectedSort, setSelectedSort,
-    theme
+    yearRange, setYearRange,
+    includeUndated, setIncludeUndated,
+    theme, config
   } = context;
 
-  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const { profile, map: mapConfig } = config.ui;
+
+  const [visibleCount, setVisibleCount] = useState(config.ui.filtering.pageSize || 60);
   const [viewMode, setViewMode] = useState('grid'); // 'grid' | 'map'
 
   const navigate = useNavigate();
@@ -96,22 +99,20 @@ export default function Home({ context }) {
 
       {!isFiltering && (
         <section className="profile-section" aria-label="Profile">
-          <div className="profile-avatar" aria-hidden="true">M</div>
+          <div className="profile-avatar" aria-hidden="true">{profile.avatar}</div>
           <div className="profile-info">
-            <h1 className="profile-name">Madhu Jagdhish</h1>
+            <h1 className="profile-name">{profile.name}</h1>
             <div className="profile-stats">
               <div className="profile-stat">
                 <strong>{allPosts.length}</strong>
                 <span>posts</span>
               </div>
               <div className="profile-stat">
-                <strong>10k+</strong>
+                <strong>{profile.stats.followers}</strong>
                 <span>followers</span>
               </div>
             </div>
-            <p className="profile-bio">
-              Sculpture Enthusiast · Documenting ancient temple art, inscriptions & architecture across South & Southeast Asia.
-            </p>
+            <p className="profile-bio">{profile.bio}</p>
           </div>
         </section>
       )}
@@ -159,16 +160,6 @@ export default function Home({ context }) {
           </div>
 
           <div className="filter-group">
-            <label>Dynasty / Era</label>
-            <select value={selectedDynasty} onChange={e => setSelectedDynasty(e.target.value)}>
-              <option value="All">All Dynasties</option>
-              {filterOptions.dynasties.map(d => (
-                <option key={d} value={d}>{d}</option>
-              ))}
-            </select>
-          </div>
-
-          <div className="filter-group">
             <label>Region</label>
             <select value={selectedGeo} onChange={e => setSelectedGeo(e.target.value)}>
               <option value="All">All Regions</option>
@@ -178,6 +169,15 @@ export default function Home({ context }) {
             </select>
           </div>
         </div>
+
+        {/* ── Dynasty Timeline Slider ── */}
+        <TimelineSlider 
+          yearRange={yearRange}
+          setYearRange={setYearRange}
+          includeUndated={includeUndated}
+          setIncludeUndated={setIncludeUndated}
+          config={config}
+        />
       </div>
 
       {isFiltering && (

@@ -46,8 +46,9 @@ uv run enrich_posts.py
 - Reads `output/posts_raw.json`.
 - For each post with text, calls `gemini-2.0-flash` to extract semantic fields.
 - Caches each response in `cache/<post_id>.json` — **re-runs are free**.
-- Geocodes unique locations via OpenStreetMap Nominatim (cached in `cache/geo_*.json`).
+- Geocodes unique locations via OpenStreetMap Nominatim.
 - Writes the final `code/src/data/posts.json` consumed by the website.
+- **Auto-Syncs UI Config**: Re-calculates timeline boundaries and dynasty dates, updating `code/src/data/archive_config.json` automatically.
 
 ---
 
