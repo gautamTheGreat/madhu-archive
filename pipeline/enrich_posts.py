@@ -17,7 +17,7 @@ from pathlib import Path
 from config_utils import sync_archive_config
 
 import httpx
-from groq import AsyncGroq
+from mistralai.client import Mistral
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -38,7 +38,7 @@ ARCHIVE_CONFIG  = PIPELINE_DIR.parent / 'code' / 'src' / 'data' / 'archive_confi
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-GROQ_MODEL      = 'llama-3.3-70b-versatile'
+MISTRAL_MODEL   = 'mistral-small-latest'
 CONTENT_LIMIT   = 6000
 
 NOMINATIM_URL   = 'https://nominatim.openstreetmap.org/search'
@@ -47,8 +47,11 @@ WIKI_API_URL    = 'https://en.wikipedia.org/w/api.php'
 
 # Rate Limiting Semaphores
 WIKI_SEMA = asyncio.Semaphore(10)
-LLM_SEMA  = asyncio.Semaphore(1)  # Free Tier: 30 RPM = 1 request per 2 seconds
+LLM_SEMA  = asyncio.Semaphore(2)  # Mistral Small allows some concurrency on paid tiers
 GEO_SEMA  = asyncio.Semaphore(1)  # Nominatim: 1 request per second
+
+# Global Stop Signal
+_STOP_EVENT = asyncio.Event()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Prompt Template
@@ -127,6 +130,7 @@ def save_json_file(path: Path, data: dict) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def service_wikipedia(query: str, fallback_query: str = None, client: httpx.AsyncClient = None) -> dict:
+    if _STOP_EVENT.is_set(): return None
     if not query or len(query) < 3:
         if fallback_query: return await service_wikipedia(fallback_query, None, client)
         return None
@@ -171,25 +175,33 @@ async def service_wikipedia(query: str, fallback_query: str = None, client: http
             ts_log(f"   ⚠ Wikipedia error ({query}): {e}")
             return None
 
-async def service_llm(prompt: str, client: AsyncGroq) -> dict:
+async def service_llm(prompt: str, client: Mistral) -> dict:
+    if _STOP_EVENT.is_set(): return None
     async with LLM_SEMA:
-        await asyncio.sleep(2.1) # Respect Free Tier 30 RPM
+        await asyncio.sleep(1.0) # Conservative delay for Mistral API
         try:
-            completion = await client.chat.completions.create(
+            resp = await client.chat.complete_async(
+                model=MISTRAL_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                model=GROQ_MODEL,
-                response_format={"type": "json_object"},
-                temperature=0.1
+                response_format={"type": "json_object"}
             )
+            content = resp.choices[0].message.content
             return {
-                **json.loads(completion.choices[0].message.content),
-                '_model': GROQ_MODEL,
+                **json.loads(content),
+                '_model': MISTRAL_MODEL,
                 '_ts': datetime.now(timezone.utc).isoformat()
             }
         except Exception as e:
+            # Mistral handles 429s etc. via standard exceptions
+            err_msg = str(e).lower()
+            if "429" in err_msg or "rate limit" in err_msg:
+                ts_log(f"‼ CRITICAL: Mistral Rate Limit Exhausted. Stopping pipeline. {e}")
+                _STOP_EVENT.set()
+                return {"_error": "rate_limit_exhausted"}
             return {"_error": str(e)}
 
 async def service_geocoding(place, district, state, country, client: httpx.AsyncClient):
+    if _STOP_EVENT.is_set(): return None
     if not place and not district and not state: return None
     
     queries = []
@@ -256,7 +268,7 @@ def extract_search_terms(post: dict) -> tuple:
             break
     return best, fallback
 
-async def process_service_layers(post: dict, force: bool, http_client: httpx.AsyncClient, groq_client: AsyncGroq):
+async def process_service_layers(post: dict, force: bool, http_client: httpx.AsyncClient, llm_client: Mistral):
     pid = post['id']
     adir = ARTIFACTS_DIR / pid
     adir.mkdir(exist_ok=True, parents=True)
@@ -286,10 +298,11 @@ async def process_service_layers(post: dict, force: bool, http_client: httpx.Asy
     if not llm or '_error' in llm:
         ctx = f"Wikipedia: {wiki['title']}\nURL: {wiki['url']}\nCONTENT:\n{wiki['extract']}" if wiki else "No Wikipedia data found."
         prompt = PROMPT_TEMPLATE.format(title=post.get('title',''), content=(post.get('content') or '')[:CONTENT_LIMIT], wiki_context=ctx)
-        llm = await service_llm(prompt, groq_client)
+        llm = await service_llm(prompt, llm_client)
         save_json_file(l_path, llm)
 
     # 4. Layer: Geocoding (Placement)
+    if _STOP_EVENT.is_set(): return pid, None
     g_path = adir / 'geocoding.json'
     geo = load_json_file(g_path) if not force else None
     if not geo or geo.get('lat') is None:
@@ -300,13 +313,12 @@ async def process_service_layers(post: dict, force: bool, http_client: httpx.Asy
             geo = await service_geocoding(loc.get('place_name'), loc.get('district'), loc.get('state'), loc.get('country'), http_client)
         if geo: save_json_file(g_path, geo)
 
-    # 5. Synthesis
+    # 5. Synthesis (Minimized)
     unified = {
-        'metadata': meta,
-        'wikipedia': wiki,
-        'llm': llm,
-        'geocoding': geo,
-        'ts_end': datetime.now(timezone.utc).isoformat()
+        'metadata': {k: meta.get(k) for k in ['id', 'search_term'] if meta.get(k)},
+        'wikipedia': {k: wiki.get(k) for k in ['title', 'url'] if wiki.get(k)} if wiki else None,
+        'llm': {k: v for k, v in llm.items() if not k.startswith('_')} if llm else None,
+        'geocoding': {k: geo.get(k) for k in ['lat', 'lng', 'source', 'level'] if geo.get(k)} if geo else None
     }
     save_json_file(u_path, unified)
     ts_log(f"   ✓ Unified {pid}")
@@ -343,13 +355,23 @@ async def main():
             emap[p['id']] = load_json_file(upath)
 
     if to_process:
-        api_key = os.environ.get('GROQ_API_KEY')
+        api_key = os.environ.get('MISTRAL_API_KEY')
+        if not api_key:
+            ts_log("⚠ ERROR: MISTRAL_API_KEY not found in environment.")
+            return
+            
         headers = {'User-Agent': NOMINATIM_UA}
-        async with httpx.AsyncClient(headers=headers) as http_client, AsyncGroq(api_key=api_key) as groq_client:
-            tasks = [process_service_layers(p, args.force, http_client, groq_client) for p in to_process]
+        async with httpx.AsyncClient(headers=headers) as http_client:
+            llm_client = Mistral(api_key=api_key)
+            tasks = [process_service_layers(p, args.force, http_client, llm_client) for p in to_process]
             results = await asyncio.gather(*tasks)
-            for pid, res in results:
-                emap[pid] = res
+            for res in results:
+                if res:
+                    pid, data = res
+                    emap[pid] = data
+        
+        if _STOP_EVENT.is_set():
+            ts_log("⚠ Execution halted due to critical error/rate limit.")
 
     # Final merge
     for p in posts:
