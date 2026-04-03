@@ -5,6 +5,7 @@ fb_export/
 *.json
 !code/package.json
 !code/package-lock.json
+.env
 
 # ── Node ───────────────────────────────────────────────────────────────────────
 node_modules/
