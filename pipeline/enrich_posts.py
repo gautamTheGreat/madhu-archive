@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,8 +33,9 @@ ARTIFACTS_DIR   = CACHE_DIR / 'artifacts'
 OUTPUT_DIR      = PIPELINE_DIR / 'output'
 RAW_JSON        = OUTPUT_DIR / 'posts_raw.json'
 ENRICHED_JSON   = OUTPUT_DIR / 'posts_enriched.json'
-SITE_DATA       = PIPELINE_DIR.parent / 'code' / 'src' / 'data' / 'posts.json'
-ARCHIVE_CONFIG  = PIPELINE_DIR.parent / 'code' / 'src' / 'data' / 'archive_config.json'
+# SITE_DATA       = PIPELINE_DIR.parent / 'code' / 'src' / 'data' / 'posts.json'
+# ARCHIVE_CONFIG  = PIPELINE_DIR.parent / 'code' / 'src' / 'data' / 'archive_config.json'
+ARCHIVE_CONFIG  = OUTPUT_DIR / 'archive_config.json'
 
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -245,6 +247,20 @@ async def service_geocoding(place, district, state, country, client: httpx.Async
 # Pipeline Orchestration
 # ──────────────────────────────────────────────────────────────────────────────
 
+def filter_valid_posts(posts: list) -> tuple:
+    valid_posts = []
+    stats = {'original_count': len(posts), 'excluded_no_media': 0, 'excluded_video': 0}
+    for p in posts:
+        media = p.get('media')
+        if not media or len(media) == 0:
+            stats['excluded_no_media'] += 1
+            continue
+        if any(m.get('type') == 'video' for m in media):
+            stats['excluded_video'] += 1
+            continue
+        valid_posts.append(p)
+    return valid_posts, stats
+
 def extract_search_terms(post: dict) -> tuple:
     content = post.get('content', '') or ''
     place_match = re.search(r'PLACE:\s*(.+)$', content, re.MULTILINE | re.IGNORECASE)
@@ -268,6 +284,132 @@ def extract_search_terms(post: dict) -> tuple:
             break
     return best, fallback
 
+def map_enriched_post(p: dict, u: dict):
+    wiki = u.get('wikipedia') or {}
+    en   = u.get('llm') or {}
+    geo  = u.get('geocoding') or {}
+    loc  = en.get('location') or {}
+    
+    dyn = en.get('dynasties') or en.get('dynasty')
+    if isinstance(dyn, str): dyn = [d.strip() for d in dyn.split(',')]
+    if not isinstance(dyn, list): dyn = []
+
+    etags = set(p.get('hashtags') or [])
+    ltags = [t for t in (en.get('tags') or []) if t not in etags]
+
+    # Remove unnecessary raw fields
+    for unwanted in ['fbid', 'fbUrl', 'hashtags', 'mediaCount', 'editHistory', 'shareLinks']:
+        p.pop(unwanted, None)
+
+    if p.get('media'):
+        for m in p['media']:
+            for unw_m in ['createdAt', 'takenAt', 'fbUrl', 'exif', 'title', 'description', 'uri']:
+                m.pop(unw_m, None)
+
+    p.update({
+        'enriched': True,
+        'temple_name': en.get('temple_name'),
+        'alternate_names': en.get('alternate_names') or [],
+        'deity': en.get('deity'),
+        'dynasties': dyn,
+        'architectural_style': en.get('architectural_style'),
+        'historical_period': en.get('historical_period'),
+        'construction_duration': en.get('construction_duration'),
+        'wikipedia_link': wiki.get('url'),
+        'location': {
+            'place_name': loc.get('place_name'), 'district': loc.get('district'),
+            'state': loc.get('state'), 'country': loc.get('country'),
+            'lat': geo.get('lat'), 'lng': geo.get('lng')
+        } if loc.get('place_name') or geo.get('lat') else None,
+        'summary': en.get('summary'),
+        'tags': sorted(list(etags)) + ltags,
+        'confidence': en.get('confidence'),
+    })
+
+def save_enrichment_summary(original_count: int, filter_stats: dict, posts: list):
+    summary = {
+        'total_original_posts': original_count,
+        'excluded_no_media': filter_stats['excluded_no_media'],
+        'excluded_video': filter_stats['excluded_video'],
+        'total_final_posts': len(posts),
+        'enriched_posts': sum(1 for p in posts if p.get('enriched')),
+        'missing_fields': {
+            'temple_name': sum(1 for p in posts if not p.get('temple_name')),
+            'dynasty': sum(1 for p in posts if not p.get('dynasties')),
+            'historical_period': sum(1 for p in posts if not p.get('historical_period')),
+            'location_coordinates': sum(1 for p in posts if not (p.get('location') and p['location'].get('lat'))),
+            'location_name': sum(1 for p in posts if not (p.get('location') and p['location'].get('place_name'))),
+            'deity': sum(1 for p in posts if not p.get('deity')),
+            'summary': sum(1 for p in posts if not p.get('summary')),
+        },
+        'confidence_distribution': {
+            'high': sum(1 for p in posts if p.get('confidence') == 'high'),
+            'medium': sum(1 for p in posts if p.get('confidence') == 'medium'),
+            'low': sum(1 for p in posts if p.get('confidence') == 'low'),
+            'none': sum(1 for p in posts if not p.get('confidence'))
+        }
+    }
+    summary_path = OUTPUT_DIR / 'enrichment_summary.json'
+    save_json_file(summary_path, summary)
+    ts_log(f"Summary written to {summary_path.name}")
+
+async def update_dynasties_meta(posts: list) -> dict:
+    unique_dynasties = set()
+    for p in posts:
+        if p.get('dynasties'):
+            for d in p['dynasties']:
+                if d and isinstance(d, str): unique_dynasties.add(d)
+    
+    dynasties_meta_path = CACHE_DIR / 'dynasties_meta.json'
+    dynasty_meta = load_json_file(dynasties_meta_path) or {}
+    missing_dynasties = [d for d in unique_dynasties if d not in dynasty_meta]
+    
+    if missing_dynasties:
+        api_key = os.environ.get('MISTRAL_API_KEY')
+        if api_key:
+            ts_log(f"Fetching metadata for {len(missing_dynasties)} new dynasties via Mistral...")
+            try:
+                llm = Mistral(api_key=api_key)
+                prompt = f"""
+                You are a historian of South and Southeast Asia.
+                Provide a JSON object mapping each of the following dynasties to its historical data.
+                Use the following JSON schema for the entire output:
+                {{
+                   "Dynasty Name": {{
+                       "start_year": int (use negative for BCE),
+                       "end_year": int,
+                       "summary": "1-sentence description including capital if known."
+                   }}
+                }}
+                Dynasties to map: {missing_dynasties}
+                """
+                resp = await llm.chat.complete_async(
+                    model=MISTRAL_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    response_format={"type": "json_object"}
+                )
+                new_meta = json.loads(resp.choices[0].message.content)
+                dynasty_meta.update(new_meta)
+                save_json_file(dynasties_meta_path, dynasty_meta)
+            except Exception as e:
+                ts_log(f"⚠ Failed to fetch dynasty metadata: {e}")
+                
+    return dynasty_meta
+
+def copy_post_media(post: dict, adir: Path, force: bool):
+    public_dir = PIPELINE_DIR.parent / 'code' / 'public'
+    for m in post.get('media', []):
+        pub_url = m.get('publicUrl')
+        if pub_url and pub_url.startswith('/'):
+            src_path = public_dir / pub_url.lstrip('/')
+            if src_path.exists():
+                dest_path = adir / src_path.name
+                if force or not dest_path.exists():
+                    try:
+                        shutil.copy2(src_path, dest_path)
+                    except OSError as e:
+                        ts_log(f"   ⚠ Failed to copy media {src_path.name}: {e}")
+
 async def process_service_layers(post: dict, force: bool, http_client: httpx.AsyncClient, llm_client: Mistral):
     pid = post['id']
     adir = ARTIFACTS_DIR / pid
@@ -284,6 +426,9 @@ async def process_service_layers(post: dict, force: bool, http_client: httpx.Asy
     best_q, fallback_q = extract_search_terms(post)
     meta = {'id': pid, 'search_term': best_q, 'fallback_term': fallback_q, 'ts_start': datetime.now(timezone.utc).isoformat()}
     save_json_file(m_path, meta)
+
+    # Copy media files into the post dir (adir)
+    copy_post_media(post, adir, force)
 
     # 2. Layer: Wikipedia (Discovery)
     w_path = adir / 'wikipedia.json'
@@ -338,7 +483,13 @@ async def main():
     with open(RAW_JSON, 'r', encoding='utf-8') as f:
         raw = json.load(f)
     
-    posts = raw['posts']
+    posts, filter_stats = filter_valid_posts(raw['posts'])
+    original_count = filter_stats['original_count']
+    if filter_stats['excluded_no_media'] > 0:
+        ts_log(f"Excluded {filter_stats['excluded_no_media']} posts with no media.")
+    if filter_stats['excluded_video'] > 0:
+        ts_log(f"Excluded {filter_stats['excluded_video']} posts containing video.")
+
     needs = [p for p in posts if p.get('content') or p.get('title')]
     
     if args.force: to_process = needs
@@ -376,47 +527,15 @@ async def main():
     # Final merge
     for p in posts:
         u = emap.get(p['id'])
-        if not u: continue
-        
-        wiki = u.get('wikipedia') or {}
-        en   = u.get('llm') or {}
-        geo  = u.get('geocoding') or {}
-        loc  = en.get('location') or {}
-        
-        dyn = en.get('dynasties') or en.get('dynasty')
-        if isinstance(dyn, str): dyn = [d.strip() for d in dyn.split(',')]
-        if not isinstance(dyn, list): dyn = []
+        if u: map_enriched_post(p, u)
 
-        etags = set(p.get('hashtags') or [])
-        ltags = [t for t in (en.get('tags') or []) if t not in etags]
-
-        p.update({
-            'enriched': True,
-            'temple_name': en.get('temple_name'),
-            'alternate_names': en.get('alternate_names') or [],
-            'deity': en.get('deity'),
-            'dynasty': ", ".join(dyn) if dyn else None,
-            'dynasties': dyn,
-            'architectural_style': en.get('architectural_style'),
-            'historical_period': en.get('historical_period'),
-            'construction_duration': en.get('construction_duration'),
-            'wikipedia_link': wiki.get('url'),
-            'location': {
-                'place_name': loc.get('place_name'), 'district': loc.get('district'),
-                'state': loc.get('state'), 'country': loc.get('country'),
-                'lat': geo.get('lat'), 'lng': geo.get('lng')
-            } if loc.get('place_name') or geo.get('lat') else None,
-            'summary': en.get('summary'),
-            'tags': sorted(list(etags)) + ltags,
-            'confidence': en.get('confidence'),
-        })
+    save_enrichment_summary(original_count, filter_stats, posts)
 
     with open(ENRICHED_JSON, 'w', encoding='utf-8') as f:
-        json.dump({**raw, 'posts': posts}, f, ensure_ascii=False, indent=2)
-    with open(SITE_DATA, 'w', encoding='utf-8') as f:
         json.dump(posts, f, ensure_ascii=False, indent=2)
     
-    sync_archive_config(SITE_DATA, ARCHIVE_CONFIG)
+    dynasty_meta = await update_dynasties_meta(posts)
+    sync_archive_config(ENRICHED_JSON, ARCHIVE_CONFIG, dynasty_meta=dynasty_meta)
     ts_log("Done.")
 
 if __name__ == '__main__':

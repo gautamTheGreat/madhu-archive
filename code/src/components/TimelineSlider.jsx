@@ -22,7 +22,7 @@ export default function TimelineSlider({ yearRange, setYearRange, includeUndated
     setYearRange([range[0], range[1]]);
   };
 
-  const majorDynasties = dynasties.filter(d => d.isMajor);
+  const majorDynasties = dynasties;
 
   return (
     <div className="timeline-container">
@@ -82,7 +82,9 @@ export default function TimelineSlider({ yearRange, setYearRange, includeUndated
               title={`${d.name}: ${d.label}`}
             >
               <span className="marker-dot" />
-              <span className="marker-label">{d.name}</span>
+              <span className="marker-label">
+                {d.name.length > 25 ? d.name.substring(0, 25) + '...' : d.name}
+              </span>
             </button>
           );
         })}

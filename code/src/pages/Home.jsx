@@ -160,6 +160,16 @@ export default function Home({ context }) {
           </div>
 
           <div className="filter-group">
+            <label>Dynasty</label>
+            <select value={selectedDynasty} onChange={e => setSelectedDynasty(e.target.value)}>
+              <option value="All">All Dynasties</option>
+              {filterOptions.dynasties.map(d => (
+                <option key={d.name} value={d.name}>{d.name.length > 30 ? d.name.substring(0, 30) + '...' : d.name}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="filter-group">
             <label>Region</label>
             <select value={selectedGeo} onChange={e => setSelectedGeo(e.target.value)}>
               <option value="All">All Regions</option>

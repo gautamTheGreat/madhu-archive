@@ -9,7 +9,7 @@ def format_year(y):
         return f"{abs(y)} BC"
     return f"{y} CE"
 
-def sync_archive_config(posts_path: Path, config_path: Path):
+def sync_archive_config(posts_path: Path, config_path: Path, dynasty_meta: dict = None):
     """
     Reads posts.json and updates archive_config.json with the latest 
     timeline boundaries, dynasty date ranges, and post statistics.
@@ -50,18 +50,28 @@ def sync_archive_config(posts_path: Path, config_path: Path):
             min_year = min(min_year, sy)
             max_year = max(max_year, sy)
 
-            dyn_name = p.get('dynasty')
-            if dyn_name:
-                if dyn_name not in dynasties_map:
-                    dynasties_map[dyn_name] = {'starts': [], 'count': 0}
+        for dyn_name in p.get('dynasties', []):
+            if dyn_name not in dynasties_map:
+                dynasties_map[dyn_name] = {'starts': [], 'count': 0}
+            if hp and hp.get('start_year') is not None:
                 dynasties_map[dyn_name]['starts'].append(sy)
-                dynasties_map[dyn_name]['count'] += 1
+            dynasties_map[dyn_name]['count'] += 1
 
     # 3. Process Dynasties
     processed_dynasties = []
+    dynasty_meta = dynasty_meta or {}
     for name, data in dynasties_map.items():
-        d_min = min(data['starts'])
-        d_max = max(data['starts'])
+        meta = dynasty_meta.get(name, {})
+        d_min = meta.get('start_year')
+        d_max = meta.get('end_year')
+        
+        if d_min is None or d_max is None:
+            if data['starts']:
+                d_min = min(data['starts'])
+                d_max = max(data['starts'])
+            else:
+                d_min, d_max = 0, 0
+
         label = f"{format_year(d_min)}" if d_min == d_max else f"{format_year(d_min)} - {format_year(d_max)}"
         
         processed_dynasties.append({
@@ -69,7 +79,8 @@ def sync_archive_config(posts_path: Path, config_path: Path):
             'range': [d_min, d_max],
             'label': label,
             'postCount': data['count'],
-            'isMajor': data['count'] >= 5 # Show on main timeline track if significant content exists
+            'isMajor': data['count'] >= 5, # Show on main timeline track if significant content exists
+            'summary': meta.get('summary') or ''
         })
 
     # Sort by start year

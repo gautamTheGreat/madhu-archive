@@ -1291,13 +1291,16 @@ body {
   transform: translateY(-50%);
   width: 100%;
   pointer-events: none;
+  -webkit-appearance: none;
   appearance: none;
-  background: none;
+  background: transparent;
+  outline: none;
   z-index: 3;
 }
 
 .thumb::-webkit-slider-thumb {
   pointer-events: auto;
+  -webkit-appearance: none;
   appearance: none;
   width: 20px;
   height: 20px;
@@ -1309,7 +1312,22 @@ body {
   transition: transform 0.1s;
 }
 
-.thumb::-webkit-slider-thumb:hover {
+.thumb::-moz-range-thumb {
+  pointer-events: auto;
+  -moz-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--accent);
+  cursor: pointer;
+  box-shadow: 0 0 10px rgba(0,0,0,0.2);
+  transition: transform 0.1s;
+}
+
+.thumb::-webkit-slider-thumb:hover,
+.thumb::-moz-range-thumb:hover {
   transform: scale(1.15);
 }
 

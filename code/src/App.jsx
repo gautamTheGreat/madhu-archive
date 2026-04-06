@@ -32,7 +32,7 @@ function App() {
   // 2. Setup Fuse.js for full-text search
   const fuse = useMemo(() => {
     return new Fuse(allPosts, {
-      keys: ['content', 'summary', 'temple_name', 'alternate_names', 'tags', 'hashtags', 'location.place_name', 'location.state', 'dynasty'],
+      keys: ['content', 'summary', 'temple_name', 'alternate_names', 'tags', 'location.place_name', 'location.state', 'dynasties'],
       threshold: config.ui.filtering.fuseThreshold || 0.3,
     });
   }, [allPosts]);
@@ -42,15 +42,18 @@ function App() {
     const dynastiesMap = new Map();
     const geos = new Set();
     allPosts.forEach(p => {
-      if (p.dynasty) {
-        if (!dynastiesMap.has(p.dynasty)) dynastiesMap.set(p.dynasty, { starts: [] });
-        if (p.historical_period && p.historical_period.start_year != null) {
-          let sy = p.historical_period.start_year;
-          if (p.historical_period.start_era === "BC" || p.historical_period.start_era === "BCE") sy = -sy;
-          dynastiesMap.get(p.dynasty).starts.push(sy);
-        }
+      if (p.dynasties) {
+        p.dynasties.forEach(dynasty => {
+          if (!dynastiesMap.has(dynasty)) dynastiesMap.set(dynasty, { starts: [] });
+          if (p.historical_period && p.historical_period.start_year != null) {
+            let sy = p.historical_period.start_year;
+            if (p.historical_period.start_era === "BC" || p.historical_period.start_era === "BCE") sy = -sy;
+            dynastiesMap.get(dynasty).starts.push(sy);
+          }
+        });
       }
       if (p.location?.state) geos.add(p.location.state);
+      else if (p.location?.district) geos.add(p.location.district);
       else if (p.location?.country) geos.add(p.location.country);
     });
 
@@ -89,12 +92,12 @@ function App() {
     }
 
     if (selectedDynasty !== 'All') {
-      result = result.filter(p => p.dynasty === selectedDynasty);
+      result = result.filter(p => p.dynasties && p.dynasties.includes(selectedDynasty));
     }
 
     if (selectedGeo !== 'All') {
       result = result.filter(p => 
-        p.location?.state === selectedGeo || p.location?.country === selectedGeo
+        p.location?.state === selectedGeo || p.location?.district === selectedGeo || p.location?.country === selectedGeo
       );
     }
 
